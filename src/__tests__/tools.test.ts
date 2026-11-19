@@ -475,6 +475,29 @@ describe('write tools', () => {
     expect(out).toMatchObject({ before: { content: '192.0.2.10' }, after: { content: '192.0.2.20' } });
   });
 
+  it('update with comment "" clears the comment, alone or with another change', async () => {
+    fetchMock
+      .mockResolvedValueOnce(ok(ZONE))
+      .mockResolvedValueOnce(ok({ ...RECORD, comment: 'old note' }))
+      .mockResolvedValueOnce(ok({ ...RECORD, comment: null }));
+    jsonOf(await call('cloudflare_update_dns_record', { ...W, record_id: RECORD_ID, current_name: 'www', comment: '' }));
+    expect(sent(2).body).toEqual({ comment: '' });
+
+    fetchMock.mockReset();
+    fetchMock
+      .mockResolvedValueOnce(ok(ZONE))
+      .mockResolvedValueOnce(ok({ ...RECORD, comment: 'old note' }))
+      .mockResolvedValueOnce(ok({ ...RECORD, ttl: 300, comment: null }));
+    jsonOf(await call('cloudflare_update_dns_record', { ...W, record_id: RECORD_ID, current_name: 'www', ttl: 300, comment: '  ' }));
+    expect(sent(2).body).toEqual({ ttl: 300, comment: '' });
+  });
+
+  it('create treats an empty comment as no comment', async () => {
+    fetchMock.mockResolvedValueOnce(ok(ZONE)).mockResolvedValueOnce(ok(RECORD));
+    jsonOf(await call('cloudflare_create_dns_record', { ...W, type: 'A', name: 'www', content: '192.0.2.1', comment: '' }));
+    expect(sent(1).body).not.toHaveProperty('comment');
+  });
+
   it('update refuses a wrong current name, content for the record type, or no change', async () => {
     fetchMock.mockResolvedValueOnce(ok(ZONE)).mockResolvedValueOnce(ok(RECORD));
     const res = await call('cloudflare_update_dns_record', { ...W, record_id: RECORD_ID, current_name: 'mail', content: '192.0.2.20' });

@@ -42,7 +42,7 @@ Every write tool takes **`zone_id` and `zone_name`**. Before changing anything i
 | Tool | Cloudflare API | Notes |
 |------|----------------|-------|
 | `cloudflare_create_dns_record` | `POST /zones/{id}/dns_records` | A, AAAA, CNAME, MX, TXT, NS. Content is checked for the type (an IP address, a host name). TTL 1 (automatic) by default; proxied only for A/AAAA/CNAME |
-| `cloudflare_update_dns_record` | `PATCH /zones/{id}/dns_records/{id}` | Content, name, TTL, proxied, MX priority, comment (not the type). Returns the record before and after |
+| `cloudflare_update_dns_record` | `PATCH /zones/{id}/dns_records/{id}` | Content, name, TTL, proxied, MX priority, comment (`""` removes it); not the type. Returns the record before and after |
 | `cloudflare_delete_dns_record` | `DELETE /zones/{id}/dns_records/{id}` | **Destructive.** Returns the deleted record so it can be recreated |
 | `cloudflare_purge_cache_urls` | `POST /zones/{id}/purge_cache` (`files`) | Up to 30 URLs, each on the zone or a subdomain of it |
 | `cloudflare_purge_cache_everything` | `POST /zones/{id}/purge_cache` (`purge_everything`) | **Destructive**: every visitor's next requests go to the origin |

@@ -35,6 +35,8 @@ export interface ParamSpec {
   maxLength?: number;
   /** Send text exactly as given (no trimming), e.g. TXT content where whitespace can matter. */
   keepWhitespace?: boolean;
+  /** An empty string is a value (e.g. "" clears a record comment), not "left out". */
+  allowEmpty?: boolean;
   default?: unknown;
 }
 
@@ -170,6 +172,10 @@ export function parseArgs(spec: ToolSpec, args: Record<string, unknown>): Record
   for (const [key, p] of Object.entries(spec.params)) {
     const given = args[key];
     const raw = given === undefined || given === null ? p.default : given;
+    if (p.allowEmpty && typeof raw === 'string' && raw.trim() === '') {
+      out[key] = '';
+      continue;
+    }
     if (raw === undefined || raw === null || (typeof raw === 'string' && raw.trim() === '' && !p.keepWhitespace)) {
       if (p.required) throw new InputError(`${key} is required`);
       continue;
