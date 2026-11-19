@@ -58,6 +58,11 @@ const PROXIED: ParamSpec = {
 };
 const PRIORITY: ParamSpec = { type: 'int', min: 0, max: 65535, description: 'MX priority (required for MX).' };
 const COMMENT: ParamSpec = { type: 'string', maxLength: 100, description: 'A note on the record (Cloudflare record comment).' };
+const COMMENT_UPDATE: ParamSpec = {
+  ...COMMENT,
+  allowEmpty: true,
+  description: 'New note on the record (Cloudflare record comment); "" removes the existing one.',
+};
 
 async function getRecord(api: Api, zoneId: string, recordId: string): Promise<Record<string, unknown>> {
   const { result } = await api.get(`/zones/${zoneId}/dns_records/${recordId}`);
@@ -141,7 +146,7 @@ export const WRITE_SPECS: ToolSpec[] = [
       ttl: TTL,
       proxied: PROXIED,
       priority: PRIORITY,
-      comment: COMMENT,
+      comment: COMMENT_UPDATE,
     },
     validate: (a) => {
       if (['name', 'content', 'ttl', 'proxied', 'priority', 'comment'].every((k) => a[k] === undefined)) {
