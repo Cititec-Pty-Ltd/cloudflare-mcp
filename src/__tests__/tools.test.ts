@@ -771,6 +771,14 @@ describe('write tools', () => {
     expect((await importBody(3)).file).toBe('$TTL 3600\nmail IN A 192.0.2.2\n');
   });
 
+  it('import treats an escaped parenthesis as a literal, not a grouping', async () => {
+    fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 2, total_records_parsed: 2 }));
+    const file = 'www IN TXT hello\\(world\napp IN TXT "a \\" ( b"\n';
+    const out = jsonOf(await call('cloudflare_import_dns_records', { zone: 'example.com.au', zone_file: file }));
+    expect(out).toMatchObject({ records_sent: 2, records_by_type: { TXT: 2 } });
+    expect((await importBody(1)).file).toBe(file);
+  });
+
   it('import reads a comment inside a multi-line record as ending at its line', async () => {
     fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 1, total_records_parsed: 1 }));
     const file = 'www IN TXT ( ; policy\n  "v=spf1 -all"\n)\n';

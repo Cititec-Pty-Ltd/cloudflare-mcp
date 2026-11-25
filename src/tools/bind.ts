@@ -91,15 +91,15 @@ function tokenize(s: string, line: number): Token[] {
   return out;
 }
 
-/** Parentheses outside quotes and comments: the change in depth over the line. */
+/** Parentheses outside quotes, comments and escapes (\( is a literal): the change in depth over the line. */
 function parenDepth(s: string): number {
   let depth = 0;
   let quoted = false;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
-    if (quoted) {
-      if (c === '\\') i++;
-      else if (c === '"') quoted = false;
+    if (c === '\\') i++;
+    else if (quoted) {
+      if (c === '"') quoted = false;
     } else if (c === '"') quoted = true;
     else if (c === ';') break;
     else if (c === '(') depth++;
