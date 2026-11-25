@@ -1,13 +1,57 @@
+import { CloudflareApiError } from '../types.js';
 import type { Api, ParamSpec, ToolSpec } from './spec.js';
-import { InputError, MismatchError, isIpv4, isIpv6, pick, toRecordName } from './shared.js';
+import { ID32, InputError, MismatchError, asList, isIpv4, isIpv6, pick, toRecordName } from './shared.js';
+import { parseBindZone } from './bind.js';
 import { recordSummary } from './read.js';
-import { ZONE_ID, ZONE_NAME, verifyZone } from './zone.js';
+import { ZONE, ZONE_ID, ZONE_NAME, resolveZone, verifyZone } from './zone.js';
 
 // Write tools. On the MCP host each call is a proposal that an administrator
-// approves before it runs. Every write takes zone_id AND zone_name: before
-// changing anything the server reads the zone and stops if the ID is not that
-// zone (and, for record changes, reads the record and stops if it is not the
-// one named). Then it sends exactly one change, never retried.
+// approves before it runs. Every write on an existing zone takes zone_id AND
+// zone_name: before changing anything the server reads the zone and stops if
+// the ID is not that zone (and, for record changes, reads the record and stops
+// if it is not the one named). Then it sends exactly one change, never retried.
+// cloudflare_create_zone is the exception: the zone does not exist yet, so it
+// takes the new zone's name (and the account) instead.
+
+/** Cloudflare's error code for "a zone with this name already exists". */
+const ZONE_EXISTS = 1061;
+
+/** Largest zone file cloudflare_import_dns_records accepts, in characters (about 256 KB). */
+const MAX_ZONE_FILE = 262_144;
+
+/** Accounts read when account_id is left out (the token must see exactly one). */
+const ACCOUNTS_PAGE = 50;
+
+/** The account a new zone goes in: account_id as given, or the token's only account. */
+async function accountForNewZone(api: Api, accountId: string | undefined): Promise<{ id: string; name?: string }> {
+  if (accountId) return { id: accountId };
+  const { result, result_info } = await api.get('/accounts', { page: 1, per_page: ACCOUNTS_PAGE });
+  const accounts = asList(result).filter((x) => typeof x.id === 'string');
+  const total = Math.max(Number(result_info?.total_count ?? 0) || 0, accounts.length);
+  if (total === 1) return { id: accounts[0].id as string, name: accounts[0].name as string | undefined };
+  if (accounts.length === 0) throw new InputError('The token cannot see any Cloudflare account, so there is nowhere to create the zone.');
+  const list = accounts.map((x) => `${String(x.name ?? '(no name)')} (${String(x.id)})`).join('; ');
+  const more = total > accounts.length ? ` ... and ${total - accounts.length} more (cloudflare_list_accounts with name finds one)` : '';
+  throw new InputError(`account_id is required: the token can see ${total} accounts. Give the client's account ID: ${list}${more}.`);
+}
+
+/** For a "zone already exists" error: the existing zone, if the token can see it. */
+async function existingZoneNote(api: Api, name: string): Promise<string> {
+  try {
+    const { result } = await api.get('/zones', { name, per_page: 5 });
+    const z = asList(result).find((x) => String(x.name).toLowerCase() === name);
+    if (z) {
+      const account = z.account as Record<string, unknown> | undefined;
+      return (
+        `It is zone ${String(z.id)} (status ${String(z.status ?? 'unknown')}` +
+        `${account?.name ? `, account ${String(account.name)}` : ''}); see cloudflare_get_zone.`
+      );
+    }
+  } catch {
+    // Fall through: the zone is not visible to this token.
+  }
+  return 'It is not in any account this token can see (another Cloudflare account has it).';
+}
 
 /** Record types the write tools accept (content is a single value for each). */
 export const RECORD_TYPES_WRITE = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'] as const;
@@ -82,6 +126,72 @@ async function setSetting(api: Api, a: Record<string, unknown>, setting: string,
 
 export const WRITE_SPECS: ToolSpec[] = [
   {
+    name: 'cloudflare_create_zone',
+    kind: 'write',
+    description:
+      'Add a domain to Cloudflare as a new zone (full setup: Cloudflare hosts its DNS). The zone starts "pending" with no DNS ' +
+      'records (none are imported unless jump_start is true) and becomes active once the registrar uses the name servers ' +
+      'Cloudflare assigns, which are returned. Recreate the domain\'s records before changing the name servers. ' +
+      'Proposal: an administrator approves it before it runs.',
+    params: {
+      zone_name: {
+        type: 'domain',
+        required: true,
+        description: 'The domain to add, e.g. example.com.au (the registered domain, not a subdomain; IDNs in xn-- form).',
+      },
+      account_id: {
+        type: 'id',
+        description:
+          'The Cloudflare account to create it in (from cloudflare_list_accounts). Required unless the token can see only one account.',
+      },
+      jump_start: {
+        type: 'boolean',
+        description:
+          'Ask Cloudflare to scan the domain\'s current DNS and import the records it finds (default false: none are imported). ' +
+          'A scan can miss records, and Cloudflare\'s current API reference no longer lists this option, so check the records ' +
+          'with cloudflare_list_dns_records either way.',
+      },
+    },
+    run: async (a, api) => {
+      const name = a.zone_name as string;
+      const account = await accountForNewZone(api, a.account_id as string | undefined);
+      const body = { name, account: { id: account.id }, type: 'full', ...(a.jump_start === true ? { jump_start: true } : {}) };
+      let result: unknown;
+      try {
+        ({ result } = await api.change('POST', '/zones', body));
+      } catch (err) {
+        if (err instanceof CloudflareApiError && err.codes.includes(ZONE_EXISTS)) {
+          throw new CloudflareApiError(
+            `A Cloudflare zone named ${name} already exists, so nothing was created. ${await existingZoneNote(api, name)}`,
+            err.httpStatus,
+            err.codes
+          );
+        }
+        throw err;
+      }
+      const z = (result ?? {}) as Record<string, unknown>;
+      const nameServers = Array.isArray(z.name_servers) ? (z.name_servers as unknown[]).map(String) : [];
+      const zoneAccount = z.account as Record<string, unknown> | undefined;
+      return {
+        created: true,
+        zone: String(z.name ?? name),
+        zone_id: z.id,
+        status: z.status,
+        type: z.type,
+        account: pick(zoneAccount ?? account, ['id', 'name']),
+        name_servers: nameServers,
+        original_name_servers: Array.isArray(z.original_name_servers) ? z.original_name_servers : [],
+        ...pick(z, ['original_registrar', 'original_dnshost', 'created_on']),
+        jump_start: a.jump_start === true,
+        next_step:
+          'The zone stays pending until the domain uses Cloudflare\'s name servers. First recreate the domain\'s DNS records ' +
+          'in this zone (cloudflare_create_dns_record), then set these name servers at the registrar: ' +
+          `${nameServers.join(', ') || '(see cloudflare_get_zone)'} (for a domain registered through Synergy Wholesale: ` +
+          'synergy_update_nameservers). Then check cloudflare_get_zone until status is active.',
+      };
+    },
+  },
+  {
     name: 'cloudflare_create_dns_record',
     kind: 'write',
     description:
@@ -123,6 +233,66 @@ export const WRITE_SPECS: ToolSpec[] = [
       };
       const { result } = await api.change('POST', `/zones/${zoneId}/dns_records`, body);
       return { created: true, zone: zoneName, record: recordSummary((result ?? {}) as Record<string, unknown>) };
+    },
+  },
+  {
+    name: 'cloudflare_import_dns_records',
+    kind: 'write',
+    description:
+      'Import DNS records into a zone from a BIND zone file (as exported by another DNS provider), in one change. ' +
+      'The text is checked first: anything that is not a BIND zone file is refused (convert it to BIND format first), ' +
+      'every record must be in the zone, and SOA and the apex NS records are left out (Cloudflare manages them). It only ' +
+      'adds records, never deletes or changes existing ones, but importing the same records twice can create duplicates: ' +
+      'list the zone\'s records first (cloudflare_list_dns_records) and leave out any that already exist. ' +
+      'Proposal: an administrator approves it before it runs.',
+    params: {
+      zone: ZONE,
+      zone_file: {
+        type: 'string',
+        required: true,
+        keepWhitespace: true,
+        maxLength: MAX_ZONE_FILE,
+        description:
+          'The zone file text in BIND format (up to 256 KB): one record per line, e.g. "www 3600 IN A 192.0.2.10". ' +
+          'Names are relative to the zone unless they end with a dot; $ORIGIN and $TTL are allowed.',
+      },
+      proxied: {
+        type: 'boolean',
+        description: 'Proxy the imported A, AAAA and CNAME records through Cloudflare (orange cloud). Default false (DNS only).',
+      },
+    },
+    validate: (a) => {
+      // A zone given by name: check the text now, before any request.
+      if (!ID32.test(a.zone as string)) parseBindZone(a.zone_file as string, a.zone as string);
+    },
+    run: async (a, api) => {
+      const z = await resolveZone(api, a.zone as string);
+      const zoneName = z.name.toLowerCase();
+      const parsed = parseBindZone(a.zone_file as string, zoneName);
+      const proxied = a.proxied === true;
+      const form = new FormData();
+      form.append('file', new Blob([parsed.text], { type: 'text/plain' }), 'zone.txt');
+      form.append('proxied', proxied ? 'true' : 'false');
+      const { result, messages } = await api.change('POST', `/zones/${z.id}/dns_records/import`, form);
+      const r = (result ?? {}) as Record<string, unknown>;
+      const sentCount = parsed.records.length;
+      const added = typeof r.recs_added === 'number' ? r.recs_added : undefined;
+      const notes = asList(messages).map((m) => pick(m, ['code', 'message']));
+      return {
+        imported: true,
+        zone: zoneName,
+        zone_id: z.id,
+        proxied,
+        records_sent: sentCount,
+        records_by_type: parsed.counts,
+        recs_added: added,
+        total_records_parsed: r.total_records_parsed,
+        ...(added !== undefined && added < sentCount
+          ? { not_added: `${sentCount - added} of the records sent were not added (already in the zone, or rejected; see cloudflare_messages).` }
+          : {}),
+        skipped: parsed.skipped,
+        ...(notes.length ? { cloudflare_messages: notes } : {}),
+      };
     },
   },
   {

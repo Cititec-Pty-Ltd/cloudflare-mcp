@@ -41,6 +41,7 @@ export type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined>;
+  /** JSON, or a FormData for a multipart upload (the DNS import). */
   body?: unknown;
   /** True for reads (GET, and the GraphQL analytics POST): only these are retried after a 429. */
   replaySafe: boolean;
@@ -98,6 +99,7 @@ export async function cfRequest(token: string, method: Method, path: string, opt
     if (v !== undefined) url.searchParams.set(k, String(v));
   }
   const what = label(method, path);
+  const multipart = options.body instanceof FormData;
   let res: Response;
   try {
     res = await fetchWithRateLimitRetry(url.toString(), what, options.replaySafe, () => ({
@@ -105,9 +107,10 @@ export async function cfRequest(token: string, method: Method, path: string, opt
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/json',
-        ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        // fetch sets the multipart Content-Type (with its boundary) itself.
+        ...(options.body !== undefined && !multipart ? { 'Content-Type': 'application/json' } : {}),
       },
-      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+      ...(options.body !== undefined ? { body: multipart ? (options.body as FormData) : JSON.stringify(options.body) } : {}),
       signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
     }));
   } catch (err) {
