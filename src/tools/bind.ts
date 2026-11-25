@@ -5,7 +5,8 @@ import { InputError } from './shared.js';
 // (so a CSV, a JSON export or a provider's table is refused before anything
 // is sent), works out each record's owner and type, and finds the lines of the
 // records Cloudflare manages itself (SOA, and NS at the apex) so they can be
-// left out. The other lines are sent to Cloudflare as written.
+// left out. The other lines are sent to Cloudflare as written, except that a record which
+// inherits the previous owner (its line starts with a space) gets the owner written out.
 
 /** Record types a zone file can hold that Cloudflare imports (plus SOA, which is dropped). */
 export const BIND_TYPES = new Set([
@@ -55,8 +56,14 @@ function tokenize(s: string, line: number): Token[] {
   let i = 0;
   while (i < s.length) {
     const c = s[i];
-    if (c === ';') break;
-    if (c === ' ' || c === '\t' || c === '(' || c === ')') {
+    if (c === ';') {
+      // A comment runs to the end of its physical line (entries in parentheses span several).
+      const nl = s.indexOf('\n', i);
+      if (nl < 0) break;
+      i = nl + 1;
+      continue;
+    }
+    if (c === ' ' || c === '\t' || c === '\n' || c === '(' || c === ')') {
       i++;
       continue;
     }
@@ -77,7 +84,7 @@ function tokenize(s: string, line: number): Token[] {
       continue;
     }
     let j = i;
-    while (j < s.length && !' \t();"'.includes(s[j])) j += s[j] === '\\' && j + 1 < s.length ? 2 : 1;
+    while (j < s.length && !' \t\n();"'.includes(s[j])) j += s[j] === '\\' && j + 1 < s.length ? 2 : 1;
     out.push({ text: s.slice(i, j), quoted: false });
     i = j;
   }
@@ -119,6 +126,9 @@ export function parseBindZone(text: string, zone: string): BindParse {
   const records: BindRecord[] = [];
   const skipped: BindSkipped[] = [];
   const drop = new Set<number>();
+  // Records that inherit the owner (the line starts with a space) get it written out: a dropped
+  // record before them would otherwise change the owner Cloudflare gives them.
+  const named = new Map<number, string>();
   const outside: string[] = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -127,7 +137,7 @@ export function parseBindZone(text: string, zone: string): BindParse {
     let depth = parenDepth(entry);
     while (depth > 0 && i + 1 < lines.length) {
       i++;
-      entry += ` ${lines[i]}`;
+      entry += `\n${lines[i]}`;
       depth += parenDepth(lines[i]);
     }
     if (depth !== 0) throw new InputError(`zone_file line ${first}: parentheses do not match. ${BAD_FORMAT}`);
@@ -180,6 +190,7 @@ export function parseBindZone(text: string, zone: string): BindParse {
       for (let l = first; l <= last; l++) drop.add(l);
       continue;
     }
+    if (startsBlank) named.set(first, `${owner}.${lines[first - 1]}`);
     records.push({ name: owner, type, firstLine: first, lastLine: last });
   }
 
@@ -198,6 +209,9 @@ export function parseBindZone(text: string, zone: string): BindParse {
   }
   const counts: Record<string, number> = {};
   for (const r of records) counts[r.type] = (counts[r.type] ?? 0) + 1;
-  const kept = lines.filter((_, idx) => !drop.has(idx + 1)).join('\n');
+  const kept = lines
+    .map((l, idx) => named.get(idx + 1) ?? l)
+    .filter((_, idx) => !drop.has(idx + 1))
+    .join('\n');
   return { records, counts, skipped, text: kept.endsWith('\n') ? kept : `${kept}\n` };
 }

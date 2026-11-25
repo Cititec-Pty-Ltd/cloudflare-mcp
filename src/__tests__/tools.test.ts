@@ -733,6 +733,32 @@ describe('write tools', () => {
     expect(out.not_added).toBeUndefined();
   });
 
+  it('import writes out an inherited owner, so a dropped SOA or NS line cannot change it', async () => {
+    fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 3, total_records_parsed: 3 }));
+    const file = [
+      'www IN A 192.0.2.1',
+      '@ IN NS ns1.example.net.',
+      '  IN MX 10 mail.example.net.',
+      'app IN A 192.0.2.2',
+      '  IN TXT "x"',
+      '',
+    ].join('\n');
+    const out = jsonOf(await call('cloudflare_import_dns_records', { zone: 'example.com.au', zone_file: file }));
+    expect(out.records_by_type).toEqual({ A: 2, MX: 1, TXT: 1 });
+    const sentFile = (await importBody(1)).file;
+    expect(sentFile).toBe(
+      'www IN A 192.0.2.1\nexample.com.au.  IN MX 10 mail.example.net.\napp IN A 192.0.2.2\napp.example.com.au.  IN TXT "x"\n'
+    );
+  });
+
+  it('import reads a comment inside a multi-line record as ending at its line', async () => {
+    fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 1, total_records_parsed: 1 }));
+    const file = 'www IN TXT ( ; policy\n  "v=spf1 -all"\n)\n';
+    const out = jsonOf(await call('cloudflare_import_dns_records', { zone: 'example.com.au', zone_file: file }));
+    expect(out).toMatchObject({ records_sent: 1, records_by_type: { TXT: 1 } });
+    expect((await importBody(1)).file).toBe(file);
+  });
+
   it('import by zone ID sends proxied and reports records Cloudflare did not add', async () => {
     fetchMock
       .mockResolvedValueOnce(ok(ZONE))
