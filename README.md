@@ -1,6 +1,6 @@
 # Cloudflare MCP server
 
-An MCP server for the [Cloudflare API](https://developers.cloudflare.com/api/). Claude can use it to look up accounts, zones, DNS records, zone settings, SSL/TLS and certificates, page rules, redirect rules, Zero Trust Access applications and traffic analytics. Separately named write tools can create, change and delete DNS records, purge the cache, set the SSL mode, and turn Always Use HTTPS and development mode on or off.
+An MCP server for the [Cloudflare API](https://developers.cloudflare.com/api/). Claude can use it to look up accounts, zones, DNS records, zone settings, SSL/TLS and certificates, page rules, redirect rules, Zero Trust Access applications and traffic analytics. Separately named write tools can add a domain as a new zone, create, change and delete DNS records, import records from a BIND zone file, purge the cache, set the SSL mode, and turn Always Use HTTPS and development mode on or off.
 
 There is **one named tool per action** and no generic "call any API path" tool: every tool calls fixed Cloudflare paths with validated arguments (IDs must be 32 hex characters, names must be domain names), so a tool can only do what its name says.
 
@@ -37,10 +37,12 @@ Results keep the useful fields only, and every result is capped at 60,000 charac
 
 ### Write tools
 
-Every write tool takes **`zone_id` and `zone_name`**. Before changing anything it reads the zone and stops if the ID is not that zone, so a wrong ID cannot change another client's zone, and an approver sees the domain name in the proposal. Record changes also read the record first and stop if it is not the one named (`current_name`, or `name` and `type` for a delete). Then the tool sends **exactly one change**, which is never retried.
+Every write tool on an existing zone takes **`zone_id` and `zone_name`** (the import takes `zone`, see below). Before changing anything it reads the zone and stops if the ID is not that zone, so a wrong ID cannot change another client's zone, and an approver sees the domain name in the proposal. Record changes also read the record first and stop if it is not the one named (`current_name`, or `name` and `type` for a delete). Then the tool sends **exactly one change**, which is never retried.
 
 | Tool | Cloudflare API | Notes |
 |------|----------------|-------|
+| `cloudflare_create_zone` | `POST /zones` (`type: full`) | Adds a domain (`zone_name`) to an account (`account_id`; optional only when the token sees a single account, otherwise the error lists them). Returns the zone ID, status (`pending` until the name servers change), the **assigned `name_servers`**, the `original_name_servers` and the next step: recreate the records, then set the name servers at the registrar (Synergy Wholesale: `synergy_update_nameservers`). No records are imported unless `jump_start` is true (default false; Cloudflare's current API reference no longer lists this option). A name that already exists (Cloudflare error 1061) returns an error naming the existing zone when the token can see it |
+| `cloudflare_import_dns_records` | `POST /zones/{id}/dns_records/import` (multipart `file`, `proxied`) | Takes `zone` (name or ID), `zone_file` (BIND text, up to 256 KB) and `proxied` (default false). The text is checked first: anything that is not a BIND zone file is refused ("convert it to BIND format first"), every record must be in the zone, and SOA and apex NS records are left out (Cloudflare manages them) and listed under `skipped`. One change for all the records. Returns `recs_added`, `total_records_parsed`, the records sent by type, and any messages Cloudflare returned for records it did not add. It only adds: importing the same records twice can create duplicates, so list the zone's records first |
 | `cloudflare_create_dns_record` | `POST /zones/{id}/dns_records` | A, AAAA, CNAME, MX, TXT, NS. Content is checked for the type (an IP address, a host name). TTL 1 (automatic) by default; proxied only for A/AAAA/CNAME |
 | `cloudflare_update_dns_record` | `PATCH /zones/{id}/dns_records/{id}` | Content, name, TTL, proxied, MX priority, comment (`""` removes it); not the type. Returns the record before and after |
 | `cloudflare_delete_dns_record` | `DELETE /zones/{id}/dns_records/{id}` | **Destructive.** Returns the deleted record so it can be recreated |
@@ -50,7 +52,7 @@ Every write tool takes **`zone_id` and `zone_name`**. Before changing anything i
 | `cloudflare_set_always_use_https` | `PATCH /zones/{id}/settings/always_use_https` | |
 | `cloudflare_set_development_mode` | `PATCH /zones/{id}/settings/development_mode` | Turns itself off after 3 hours |
 
-Destructive tools have the MCP annotation `destructiveHint: true` (all others `false`), and the package exports their names (`DESTRUCTIVE_TOOL_NAMES`) so a host can gate them separately. SRV, CAA and other structured record types can be read but not written by these tools.
+Destructive tools have the MCP annotation `destructiveHint: true` (all others `false`), and the package exports their names (`DESTRUCTIVE_TOOL_NAMES`) so a host can gate them separately. SRV, CAA and other structured record types cannot be created one at a time; they can be added with `cloudflare_import_dns_records`.
 
 ## API token permissions
 
@@ -74,9 +76,11 @@ Create a **custom user API token** (dash.cloudflare.com > My Profile > API Token
 
 | Scope | Permission | Level | Used by |
 |-------|-----------|-------|---------|
-| Zone | DNS | **Edit** | create, update and delete DNS records |
+| Zone | DNS | **Edit** | create, update and delete DNS records, `cloudflare_import_dns_records`, `cloudflare_create_zone` (see below) |
 | Zone | Zone Settings | **Edit** | SSL mode, Always Use HTTPS, development mode |
 | Zone | Cache Purge | **Purge** | both purge tools |
+
+Creating a zone (`cloudflare_create_zone`, `POST /zones`): Cloudflare's [Create Zone](https://developers.cloudflare.com/api/resources/zones/methods/create/) reference accepts **either Zone > Zone > Edit or Zone > DNS > Edit**, so the write token above (DNS Edit, Zone Resources "All zones") needs no new permission. It does not need DNS Edit if it has Zone Edit instead; DNS Edit is the narrower choice, because Zone > Zone > Edit also lets the token delete and pause zones through the API (no tool here does). If Cloudflare refuses the first zone creation with 403 (code 9109), add **Zone > Zone > Edit** to the write token. Either way the token's Zone Resources must be "All zones" or "All zones from an account" (a token limited to named zones cannot cover a zone that does not exist yet) and its Account Resources must include the account. Importing (`cloudflare_import_dns_records`) needs DNS Write, i.e. DNS Edit ([Import DNS Records](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/import/)).
 
 For both tokens:
 - **Account Resources:** Include > All accounts. **Zone Resources:** Include > All zones from all accounts (or All zones). New client accounts and zones are then covered without editing the token.
@@ -101,7 +105,7 @@ Cloudflare allows **1,200 requests per 5 minutes per user** (dashboard and API t
 - a **write** is **never** retried; the error says it was not retried;
 - otherwise the tool returns `rate_limited` with `retry_after_seconds` (`Retry-After`, or 300 when Cloudflare gives none).
 
-Most tools make one request; a zone given by name adds one; `cloudflare_get_ssl_status` makes two; writes make two (zone check, change) and record updates and deletes three (zone check, record check, change). The Cititec MCP host also limits calls for everyone together, from these figures.
+Most tools make one request; a zone given by name adds one; `cloudflare_get_ssl_status` makes two; writes make two (zone check, change) and record updates and deletes three (zone check, record check, change). `cloudflare_create_zone` makes one (two without `account_id`: the account lookup), plus one read after a "zone already exists" error; `cloudflare_import_dns_records` makes two (zone lookup, import). The Cititec MCP host also limits calls for everyone together, from these figures.
 
 ## Development
 
