@@ -76,12 +76,11 @@ Create a **custom user API token** (dash.cloudflare.com > My Profile > API Token
 
 | Scope | Permission | Level | Used by |
 |-------|-----------|-------|---------|
-| Zone | Zone | **Edit** | `cloudflare_create_zone` |
-| Zone | DNS | **Edit** | create, update and delete DNS records, `cloudflare_import_dns_records` |
+| Zone | DNS | **Edit** | create, update and delete DNS records, `cloudflare_import_dns_records`, `cloudflare_create_zone` (see below) |
 | Zone | Zone Settings | **Edit** | SSL mode, Always Use HTTPS, development mode |
 | Zone | Cache Purge | **Purge** | both purge tools |
 
-Creating a zone: Cloudflare's [Create Zone](https://developers.cloudflare.com/api/resources/zones/methods/create/) reference accepts either **Zone > Zone > Edit** or **Zone > DNS > Edit** for `POST /zones`, so the write token above (which already has DNS Edit) can create zones; Zone > Zone > Edit is listed because it is the permission meant for zone management. The token's **Zone Resources** must be "All zones from an account" or "All zones" (a token limited to named zones cannot cover a zone that does not exist yet), and its **Account Resources** must include the account. Zone > Zone > Edit also lets the token delete and pause zones through the API; no tool here does that. [Import DNS Records](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/import/) needs DNS Write (DNS Edit).
+Creating a zone (`cloudflare_create_zone`, `POST /zones`): Cloudflare's [Create Zone](https://developers.cloudflare.com/api/resources/zones/methods/create/) reference accepts **either Zone > Zone > Edit or Zone > DNS > Edit**, so the write token above (DNS Edit, Zone Resources "All zones") needs no new permission. It does not need DNS Edit if it has Zone Edit instead; DNS Edit is the narrower choice, because Zone > Zone > Edit also lets the token delete and pause zones through the API (no tool here does). If Cloudflare refuses the first zone creation with 403 (code 9109), add **Zone > Zone > Edit** to the write token. Either way the token's Zone Resources must be "All zones" or "All zones from an account" (a token limited to named zones cannot cover a zone that does not exist yet) and its Account Resources must include the account. Importing (`cloudflare_import_dns_records`) needs DNS Write, i.e. DNS Edit ([Import DNS Records](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/import/)).
 
 For both tokens:
 - **Account Resources:** Include > All accounts. **Zone Resources:** Include > All zones from all accounts (or All zones). New client accounts and zones are then covered without editing the token.
