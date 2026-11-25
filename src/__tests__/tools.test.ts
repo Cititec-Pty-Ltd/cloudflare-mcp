@@ -751,6 +751,26 @@ describe('write tools', () => {
     );
   });
 
+  it('import keeps a TTL inherited from a dropped record when there is no $TTL', async () => {
+    fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 4, total_records_parsed: 4 }));
+    const file = [
+      'www 300 IN A 192.0.2.1',
+      '@ 86400 IN NS ns1.example.net.',
+      'mail IN A 192.0.2.2',
+      '  IN AAAA 2001:db8::2',
+      'ftp IN A 192.0.2.3',
+      '',
+    ].join('\n');
+    await call('cloudflare_import_dns_records', { zone: 'example.com.au', zone_file: file });
+    expect((await importBody(1)).file).toBe(
+      'www 300 IN A 192.0.2.1\nmail 86400 IN A 192.0.2.2\nmail.example.com.au.  IN AAAA 2001:db8::2\nftp IN A 192.0.2.3\n'
+    );
+    fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 1, total_records_parsed: 1 }));
+    const withDefault = '$TTL 3600\n@ 86400 IN NS ns1.example.net.\nmail IN A 192.0.2.2\n';
+    await call('cloudflare_import_dns_records', { zone: 'example.com.au', zone_file: withDefault });
+    expect((await importBody(3)).file).toBe('$TTL 3600\nmail IN A 192.0.2.2\n');
+  });
+
   it('import reads a comment inside a multi-line record as ending at its line', async () => {
     fetchMock.mockResolvedValueOnce(ok([ZONE])).mockResolvedValueOnce(ok({ recs_added: 1, total_records_parsed: 1 }));
     const file = 'www IN TXT ( ; policy\n  "v=spf1 -all"\n)\n';

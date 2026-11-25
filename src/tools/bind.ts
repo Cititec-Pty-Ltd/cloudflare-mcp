@@ -130,6 +130,10 @@ export function parseBindZone(text: string, zone: string): BindParse {
   // record before them would otherwise change the owner Cloudflare gives them.
   const named = new Map<number, string>();
   const outside: string[] = [];
+  let dollarTtl = false;
+  /** The last TTL stated on any record, and on a record that is sent. */
+  let lastTtl: string | undefined;
+  let lastKeptTtl: string | undefined;
 
   for (let i = 0; i < lines.length; i++) {
     const first = i + 1;
@@ -152,7 +156,10 @@ export function parseBindZone(text: string, zone: string): BindParse {
         origin = absolute(tokens[1].text, origin);
         continue;
       }
-      if (head === '$TTL' && tokens[1] && TTL.test(tokens[1].text)) continue;
+      if (head === '$TTL' && tokens[1] && TTL.test(tokens[1].text)) {
+        dollarTtl = true;
+        continue;
+      }
       throw new InputError(`zone_file line ${first}: ${tokens[0].text} is not supported here. ${BAD_FORMAT}`);
     }
 
@@ -165,9 +172,12 @@ export function parseBindZone(text: string, zone: string): BindParse {
       k = 1;
     }
     // Optional TTL and class, in either order.
+    let ttl: string | undefined;
     for (let n = 0; n < 2 && k < tokens.length; n++) {
       const t = tokens[k].text.toUpperCase();
-      if (!tokens[k].quoted && (TTL.test(t) || CLASSES.has(t))) k++;
+      if (tokens[k].quoted) break;
+      if (TTL.test(t)) ttl = tokens[k].text;
+      if (TTL.test(t) || CLASSES.has(t)) k++;
     }
     const type = k < tokens.length && !tokens[k].quoted ? tokens[k].text.toUpperCase() : '';
     if (!owner || !BIND_TYPES.has(type) || k + 1 >= tokens.length) {
@@ -185,12 +195,25 @@ export function parseBindZone(text: string, zone: string): BindParse {
         : type === 'NS' && owner === zone
           ? 'NS at the apex: Cloudflare assigns the zone\'s name servers'
           : undefined;
+    if (ttl !== undefined) lastTtl = ttl;
     if (reason) {
       skipped.push({ name: owner, type, line: first, reason });
       for (let l = first; l <= last; l++) drop.add(l);
       continue;
     }
-    if (startsBlank) named.set(first, `${owner}.${lines[first - 1]}`);
+    // Without $TTL, a record with no TTL takes the last one stated (RFC 1035 5.1). If that came
+    // from a record left out, write it on this record so its TTL does not change.
+    const addTtl = ttl === undefined && !dollarTtl && lastTtl !== undefined && lastTtl !== lastKeptTtl;
+    if (startsBlank || addTtl) {
+      const line = lines[first - 1];
+      named.set(
+        first,
+        startsBlank
+          ? `${owner}.${addTtl ? ` ${lastTtl}` : ''}${line}`
+          : line.replace(/^(\S+)/, `$1 ${lastTtl}`)
+      );
+    }
+    lastKeptTtl = ttl ?? (addTtl ? lastTtl : lastKeptTtl);
     records.push({ name: owner, type, firstLine: first, lastLine: last });
   }
 

@@ -52,7 +52,7 @@ Every write tool on an existing zone takes **`zone_id` and `zone_name`** (the im
 | `cloudflare_set_always_use_https` | `PATCH /zones/{id}/settings/always_use_https` | |
 | `cloudflare_set_development_mode` | `PATCH /zones/{id}/settings/development_mode` | Turns itself off after 3 hours |
 
-Destructive tools have the MCP annotation `destructiveHint: true` (all others `false`), and the package exports their names (`DESTRUCTIVE_TOOL_NAMES`) so a host can gate them separately. SRV, CAA and other structured record types can be read but not written by these tools.
+Destructive tools have the MCP annotation `destructiveHint: true` (all others `false`), and the package exports their names (`DESTRUCTIVE_TOOL_NAMES`) so a host can gate them separately. SRV, CAA and other structured record types cannot be created one at a time; they can be added with `cloudflare_import_dns_records`.
 
 ## API token permissions
 
